@@ -1,1 +1,1 @@
-from polygon import SoftPolygon
+from .polygon import SoftPolygon

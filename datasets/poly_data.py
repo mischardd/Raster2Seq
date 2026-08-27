@@ -74,7 +74,7 @@ class MultiPoly(Dataset):
         )
 
     def get_image(self, path):
-        return Image.open(os.path.join(self.root, path))
+        return Image.open(os.path.join(self.root, path)).convert("L")
 
     def get_vocab_size(self):
         if self.poly2seq:
@@ -195,7 +195,10 @@ class ConvertToCocoDict(object):
 
         file_name = os.path.join(self.root, path)
 
-        img = np.array(Image.open(file_name))
+        img_pil = Image.open(file_name).convert("L")
+
+        img_resized = img_pil.resize((512, 512), Image.Resampling.BILINEAR)
+        img = np.array(img_resized)
 
         #### NEW
         if len(img.shape) >= 3:

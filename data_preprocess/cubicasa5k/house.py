@@ -399,11 +399,11 @@ class House:
         self.width = width
         shape = height, width
         svg = minidom.parse(path)
-        self.walls = np.empty((height, width), dtype=np.uint8)
+        self.walls = np.empty((height, width), dtype=np.uint16)
         self.walls.fill(0)
-        self.wall_ids = np.empty((height, width), dtype=np.uint8)
+        self.wall_ids = np.empty((height, width), dtype=np.uint16)
         self.wall_ids.fill(0)
-        self.icons = np.zeros((height, width), dtype=np.uint8)
+        self.icons = np.zeros((height, width), dtype=np.uint16)
         # junction_id = 0
         wall_id = 1
         self.wall_ends = []

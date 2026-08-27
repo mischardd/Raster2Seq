@@ -5,7 +5,6 @@ import sys
 from multiprocessing import Pool
 from pathlib import Path
 
-import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 from loaders import FloorplanSVG
@@ -14,12 +13,22 @@ from PIL import Image
 from shapely.geometry import Polygon
 from skimage import measure
 from tqdm import tqdm
-
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from common_utils import resort_corners
 from stru3d.stru3d_utils import type2id
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+import cv2
+
+cv2.setNumThreads(0)
+
+import torch
+
+torch.set_num_threads(1)
 
 #### ORIGINAL ROOM NAMES & ICON_NAMES ####
 ROOM_NAMES = {
@@ -664,7 +673,7 @@ if __name__ == "__main__":
         print(f"############# {split_file}")
 
         annos_folder = annos_folders[split_id]
-        num_processes = 16
+        num_processes = 1
         with Pool(num_processes, initializer=worker_init, initargs=(dataset,)) as p:
             indices = range(len(dataset))
             list(tqdm(p.imap(wrapper, indices), total=len(dataset)))
