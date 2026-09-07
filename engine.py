@@ -660,7 +660,7 @@ def evaluate_floor(
                 curr_opts.scene_id = "scene_0" + str(scene_ids[i])
                 curr_data_rw = S3DRW(curr_opts, mode="test")
                 evaluator = Evaluator(curr_data_rw, curr_opts, disable_overlapping_filter=poly2seq)
-            elif dataset_name in ["cubicasa", "waffle", "r2g"]:
+            elif dataset_name in ["cubicasa", "waffle", "r2g", "custom"]:
                 evaluator = Evaluator_RPlan(
                     disable_overlapping_filter=poly2seq, iou_thres=iou_thres, wd_as_line=wd_as_line
                 )
@@ -698,7 +698,7 @@ def evaluate_floor(
                         window_door_lines=window_doors,
                         window_door_lines_types=window_doors_types,
                     )
-            elif dataset_name in ["cubicasa", "waffle", "r2g"]:
+            elif dataset_name in ["cubicasa", "waffle", "r2g", "custom"]:
                 if not semantic_rich:
                     quant_result_dict_scene = evaluator.evaluate_scene(
                         room_polys=room_polys,

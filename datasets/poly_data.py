@@ -74,7 +74,7 @@ class MultiPoly(Dataset):
         )
 
     def get_image(self, path):
-        return Image.open(os.path.join(self.root, path)).convert("L")
+        return Image.open(os.path.join(self.root, path)).convert("RGB")
 
     def get_vocab_size(self):
         if self.poly2seq:

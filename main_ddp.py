@@ -42,6 +42,7 @@ def get_args_parser():
     parser.add_argument("--image_norm", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--eval_every_epoch", type=int, default=20)
+    parser.add_argument("--disable_eval", action="store_true")
     parser.add_argument("--ckpt_every_epoch", type=int, default=20)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--ignore_index", type=int, default=-1)
@@ -417,6 +418,8 @@ def main(args):
     if args.start_from_checkpoint:
         checkpoint = torch.load(args.start_from_checkpoint, map_location="cpu")["model"]
         for key, value in checkpoint.items():
+            model_ref = model.module if hasattr(model, "module") else model
+            attn_mask = getattr(model_ref, "attention_mask", None)
             if key.startswith("class_embed"):
                 if checkpoint[key].size(0) != model.module.num_classes:
                     if "weight" in key:
@@ -432,7 +435,12 @@ def main(args):
                     )
             elif "pos_embed" in key and checkpoint[key].shape[1] != model.module.transformer.pos_embed.shape[1]:
                 checkpoint[key] = model.module.transformer.pos_embed
-            elif "attention_mask" in key and checkpoint[key].shape[0] != model.module.attention_mask.shape[0]:
+            elif (
+                "attention_mask" in key 
+                and checkpoint.get(key) is not None 
+                and attn_mask is not None 
+                and checkpoint[key].shape[0] != attn_mask.shape[0]
+            ):
                 checkpoint[key] = model.module.attention_mask
             elif key.startswith("input_proj") and key.endswith("weight"):
                 # only modify the conv layer
@@ -542,7 +550,7 @@ def main(args):
             wandb.log(train_log_dict)
 
         # eval every 20
-        if (epoch + 1) % args.eval_every_epoch == 0:
+        if not args.disable_eval and (epoch + 1) % args.eval_every_epoch == 0:
             eval_model = model if not args.ema4eval else ema
             test_stats = evaluate(
                 eval_model,

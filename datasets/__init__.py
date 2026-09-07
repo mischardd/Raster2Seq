@@ -2,7 +2,7 @@ from .poly_data import build as build_poly
 
 
 def build_dataset(image_set, args):
-    if args.dataset_name in ["stru3d", "cubicasa", "waffle", "r2g"]:
+    if args.dataset_name in ["stru3d", "cubicasa", "waffle", "r2g", "custom"]:
         print(f"Build {args.dataset_name} {image_set} dataset")
         return build_poly(image_set, args)
     raise ValueError(f"dataset {args.dataset_name} not supported")
@@ -60,6 +60,21 @@ def get_dataset_class_labels(dataset_name):
             "washing_room": 9,
             "PS": 10,
             "outside": 11,
+        }
+    elif dataset_name == "custom":
+        semantics_label = {
+            "livingroom": 1,
+            "bedroom": 2,
+            "kitchen": 3,
+            "bathroom": 4,
+            "corridor": 5,
+            "balcony": 6,
+            "elevator": 7,
+            "stairs": 8,
+            "utilityroom": 9,
+            "closet": 10,
+            "courtyard": 11,
+            "entry": 12
         }
 
     id2class = {v: k for k, v in semantics_label.items()} if semantics_label else None
