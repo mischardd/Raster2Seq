@@ -5,10 +5,11 @@ import sys
 import io
 from multiprocessing import Pool
 from pathlib import Path
+import shutil
 import cairosvg
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import KFold
-
+import vtracer
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -17,6 +18,7 @@ from PIL import Image
 from shapely.geometry import Polygon
 from skimage import measure
 from tqdm import tqdm
+import albumentations as A
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -29,6 +31,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 import cv2
 
 cv2.setNumThreads(0)
+instance_id = 0
 
 import torch
 
@@ -60,7 +63,7 @@ CUBICASA_MAPPER = {
     "entry": 12, "entry_living_room_dining": 12,
 }
 
-DEFAULT_CATEGORY = 9 
+DEFAULT_CATEGORY = 2
 
 CUBICASA_CATEGORIES = [
     {"id": 1, "name": "LivingRoom", "supercategory": "room"},
@@ -76,6 +79,52 @@ CUBICASA_CATEGORIES = [
     {"id": 11, "name": "Courtyard", "supercategory": "room"},
     {"id": 12, "name": "Entry", "supercategory": "room"},
 ]
+
+CUSTOM_TO_CUBICASA_ID_MAPPER = {
+    0: 1,   # LivingRoom -> Living Room
+    1: 2,   # Bedroom -> Bedroom
+    2: 3,   # Kitchen -> Kitchen
+    3: 4,   # Bathroom -> Bath (CubiCasa ID)
+    4: 5,   # Corridor -> Hallway
+    5: 0,   # Balcony -> Outdoor (or drop if using drop_label_ids)
+    6: 10,  # Elevator -> Other Rooms
+    7: 10,  # Stairs -> Other Rooms
+    8: 7,   # UtilityRoom -> Storage
+    9: 7,   # Closet -> Storage
+    10: 0,  # Courtyard -> Outdoor
+    11: 5,  # Entry -> Hallway
+}
+
+CC5K_MAPPING_2 = {
+    0: None,
+    1: 0,  # Outdoor
+    2: None,  # Wall
+    3: 1,  # Kitchen
+    4: 2,  # Living Room
+    5: 3,  # Bed Room
+    6: 4,  # Bath
+    7: 5,  # Entry
+    8: None,  # Railing -> Wall
+    9: 6,  # Storage
+    10: 7,  # Garage
+    11: 8,  # Undefined
+    12: 9,  # Window
+    13: 10,  # Door
+}
+
+CC5K_CLASS_MAPPING_2 = {
+    "Outdoor": 0,
+    "Kitchen": 1,
+    "Living Room": 2,
+    "Bed Room": 3,
+    "Bath": 4,
+    "Entry": 5,
+    "Storage": 6,
+    "Garage": 7,
+    "Undefined": 8,
+    "Window": 9,
+    "Door": 10,
+}
 
 
 def fill_holes_in_mask(binary_mask):
@@ -318,17 +367,34 @@ def enumerate_plan(path: Path) -> tuple[dict] | None:
     for subpath in images_path.iterdir():
         images.append(subpath)
 
-    for image in images:
-        for area_file in areas_path.iterdir():
-            if area_file.stem.startswith(image.stem) and area_file.name.endswith(".json"):
+    
+    for area_file in areas_path.iterdir():
+        for image in images:
+            #if image.stem in SKIP_PLANS:
+            #    print("Skipping plan: {}".format(image))
+            #    continue
+            """if area_file.stem.startswith(image.stem) and area_file.name.endswith(".json"):
                 annotations.append(
                     {
                         "image": image.absolute(),
                         "area_file": area_file.absolute()
                     }
-                )
+            )"""
+            #prefix = area_file.stem.removesuffix("areas").removesuffix("2d")
+            with open(area_file, "r") as f:
+                data = json.load(f)
+            
+                if image.name == data["image_name"]:
+                    annotations.append(
+                        {
+                            "image": image.absolute(),
+                            "area_file": area_file.absolute()
+                        }
+                    )
                 
-    return annotations
+    #if len(annotations) < DATASET_PROVIDER_DEPTH:
+    #    return None
+    return annotations #[:DATASET_PROVIDER_DEPTH]
 
 
 def create_coco_bounding_box(bb_x, bb_y, image_width, image_height, bound_pad=2):
@@ -348,6 +414,12 @@ def create_coco_bounding_box(bb_x, bb_y, image_width, image_height, bound_pad=2)
 
 
 def prepare_dict(categories_dict):
+    save_dict = {"images": [], "annotations": [], "categories": []}
+    for key, value in categories_dict.items():
+        type_dict = {"supercategory": "room", "id": value, "name": key}
+        save_dict["categories"].append(type_dict)
+    return save_dict
+
     save_dict = {"images": [], "annotations": [], "categories": []}
     temp_categories = []
     for item in categories_dict:
@@ -372,9 +444,9 @@ def prepare_dict2(categories_dict):
 
 
 def _prepare_dataset(dataset, image_size: int, coco_json_path: Path, img_folder: Path, start_scene_id: int):
-    save_dict = prepare_dict(CUBICASA_CATEGORIES)
+    save_dict = prepare_dict(CC5K_CLASS_MAPPING_2)
     scene_id = 0
-    instance_id = 0
+    global instance_id
 
     for item in dataset:
         image_path = item["image"]
@@ -391,9 +463,12 @@ def _prepare_dataset(dataset, image_size: int, coco_json_path: Path, img_folder:
             for item in data.get("areas", []):
                 raw_id = item["id"]
                 area_class = item["label_id"]
-                class_id = CUBICASA_MAPPER.get(area_class.lower().strip(), DEFAULT_CATEGORY)
-                print("Mapped {} to {}".format(area_class.lower().strip(), class_id))
-                assert class_id < 13
+                class_raw_label = item["raw_label"]
+                if class_raw_label == "All" or class_raw_label.lower() == "all":
+                    print("! ----- Skipped 'ALL' contour -----")
+                    continue
+                class_id = CUSTOM_TO_CUBICASA_ID_MAPPER.get(CUBICASA_MAPPER.get(area_class.lower().strip(), DEFAULT_CATEGORY), DEFAULT_CATEGORY)
+                #print("Mapped {} to {}".format(area_class.lower().strip(), class_id))
                 
                 polygon_coords = item["polygon_px"]
                 room_polygons.append([polygon_coords, class_id])
@@ -405,87 +480,136 @@ def _prepare_dataset(dataset, image_size: int, coco_json_path: Path, img_folder:
             else:
                 img = Image.open(image_path).convert("RGB")
             
-            old_w = data["width"]
-            old_h = data["height"]
+            #old_w = data["width"]
+            #old_h = data["height"]
             #print("resizing to {}x{}".format(image_size, image_size))
-            img = img.resize((image_size, image_size), Image.Resampling.BILINEAR)
+            #img = img.resize((image_size, image_size), Image.Resampling.BILINEAR)
+            annotated_w = data["width"]
+            annotated_h = data["height"]
+            #img = img.resize((annotated_w, annotated_h), Image.Resampling.BILINEAR)
             new_w, new_h = img.size
-            scale_w = image_size / old_w
-            scale_h = image_size / old_h
-            #print("scale: {}x{}".format(scale_w, scale_h))
+            print(f"Original size: {new_w}, {new_h}")
+            print(f"Annotated size: {annotated_w}, {annotated_h}")
+            scale_w = new_w / annotated_w
+            scale_h = new_h / annotated_h
+            print("Scale: {}x{}".format(scale_w, scale_h))
+
+            M = np.float32([
+                [scale_w, 0.0, 0.0],
+                [0.0, scale_h, 0.0]
+            ])
 
             scaled_room_polygons = []
             for poly, class_name in room_polygons:
-                scaled_poly = []
-                for pt in poly:
-                    x, y = pt
-                    new_x = int(round(x * scale_w))
-                    new_y = int(round(y * scale_h))
-                    new_x = max(0, min(new_x, image_size - 1))
-                    new_y = max(0, min(new_y, image_size - 1))
-                    
-                    scaled_poly.append((new_x, new_y))
-                scaled_room_polygons.append((scaled_poly, class_name))
+                #scaled_poly = []
+                #for pt in poly:
+                #    x, y = pt
+                #    new_x = int(round(x * scale_w))
+                #    new_y = int(round(y * scale_h))
+                #    #new_x = max(0, min(new_x, image_size - 1))
+                #    #new_y = max(0, min(new_y, image_size - 1))
+                #    
+                #    scaled_poly.append((new_x, new_y))
+                original_poly_cv = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
+                scaled_poly = cv2.transform(original_poly_cv, M).astype(np.int32)
+                approx_poly = scaled_poly.astype(np.float32).reshape(-1, 2)
+                scaled_room_polygons.append((approx_poly, class_name))
             room_polygons = scaled_room_polygons
+
+            img_array = np.array(img)
+            output_image = img_array.copy()
+            output_image = cv2.cvtColor(output_image, cv2.COLOR_RGB2BGR)
+
+            inter_image = img_array.copy()
+            mask = np.zeros((new_h + 2, new_w + 2), np.uint8)
+            cv2.floodFill(output_image, mask, (0, 0), (255, 255, 255))
+            cv2.floodFill(inter_image, mask, (0, 0), (255, 255, 255))
+            for poly, _ in room_polygons:
+                random_color = np.random.randint(0, 256, size=3).tolist()
+                original_poly_cv = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.drawContours(output_image, [original_poly_cv], -1, random_color, thickness=3)
+            cv2.imwrite("./output_stratify_{}_{}.png".format(scene_id, image_path.stem), output_image)
             
             binary_mask = np.zeros((new_h, new_w), dtype=np.uint8)
             for poly, _ in room_polygons:
                 pts = np.array(poly, dtype=np.int32)
                 cv2.fillPoly(binary_mask, [pts], color=1)
 
-            filled_mask = fill_holes_in_mask(binary_mask)
-            fixed_mask_size = 512
-            binary_mask_1024 = cv2.resize(
-                filled_mask,
-                (fixed_mask_size, fixed_mask_size),
-                interpolation=cv2.INTER_NEAREST,
-            )
-            img.info.pop("icc_profile", None)
+            #filled_mask = fill_holes_in_mask(binary_mask)
+            #fixed_mask_size = 512
+            #binary_mask_1024 = cv2.resize(
+            #    filled_mask,
+            #    (fixed_mask_size, fixed_mask_size),
+            #    interpolation=cv2.INTER_NEAREST,
+            #)
+            #img.info.pop("icc_profile", None)
+            #if len(binary_mask.shape) == 2 and len(img_array.shape) == 3:
+            #    binary_mask = binary_mask[:, :, np.newaxis]
 
-            if binary_mask_1024 is not None:
-                img_array = np.array(img)
-                if len(binary_mask.shape) == 2 and len(img_array.shape) == 3:
-                    binary_mask_1024 = binary_mask_1024[:, :, np.newaxis]
-                img_1024 = cv2.resize(
-                    img_array,
-                    (fixed_mask_size, fixed_mask_size),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-                masked_img = np.where(binary_mask_1024 == 0, 255, img_1024)
-                img = Image.fromarray(masked_img.astype(np.uint8))
-
+            #if binary_mask_1024 is not None:
+            #    if len(binary_mask.shape) == 2 and len(img_array.shape) == 3:
+            #        binary_mask_1024 = binary_mask_1024[:, :, np.newaxis]
+                #img_1024 = cv2.resize(
+                #    img_array,
+                #    (fixed_mask_size, fixed_mask_size),
+                #    interpolation=cv2.INTER_NEAREST,
+                #)
+                #img_1024 = cv2.
+                #gray_image = cv2.cvtColor(img_1024, cv2.COLOR_BGR2GRAY)
+                #optimal_thresh, binary_image = cv2.threshold(
+                #    gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                #)
+                #binary_3channel = cv2.cvtColor(binary_image, cv2.COLOR_GRAY2BGR)
+            #masked_img = np.where(binary_mask == 0, 255, img)
+            img = Image.fromarray(inter_image.astype(np.uint8))
             img.save(f"{img_folder}/{str(img_id).zfill(5) + '.png'}")
         
-            coco_annotation_dict_list = []
+            #coco_annotation_dict_list = []
         
-            for poly_ind, (polygon, class_id) in enumerate(room_polygons):                
+            for poly_ind, (polygon, class_id) in enumerate(room_polygons):  
+                poly_shapely = Polygon(polygon)
+                area = poly_shapely.area              
                 polygon_array = np.array(polygon)
                 poly_sorted = resort_corners(polygon_array)
-                
-                coco_seg_poly = []
-                for p in poly_sorted:
-                    coco_seg_poly += [int(p[0]), int(p[1])] # was float before
-                
 
-                #if len(coco_seg_poly) < 6:
+                poly_type = CC5K_MAPPING_2[class_id]
+                if poly_type is None:
+                    poly_type = DEFAULT_CATEGORY
+                #if poly_type not in [10, 9] and area < 100:
+                #    continue
+                #if poly_type in [10, 9] and area < 1:
                 #    continue
 
-                pairs = [(coco_seg_poly[i], coco_seg_poly[i+1]) for i in range(0, len(coco_seg_poly), 2)]
-                poly_shapely = Polygon(pairs)
+                rectangle_shapely = poly_shapely.envelope
+                polygon = np.array(polygon)
 
-                area = poly_shapely.area
+                coco_seg_poly = []
+                poly_sorted = resort_corners(polygon)
+
+                for p in poly_sorted:
+                    coco_seg_poly += list(p)
+                
+                #coco_seg_poly = []
+                #for p in poly_sorted:
+                #    coco_seg_poly += [int(p[0]), int(p[1])] # was float before
+
+                #pairs = [(coco_seg_poly[i], coco_seg_poly[i+1]) for i in range(0, len(coco_seg_poly), 2)]
+                #poly_shapely = Polygon(pairs)
+                #area = poly_shapely.area
                 
                 #if area < 100: 
                 #    continue
                     
-                #bb_x, bb_y = poly_shapely.envelope.exterior.xy
-                #coco_bb = create_coco_bounding_box(bb_x, bb_y, new_w, new_h, bound_pad=2)
-                xs = coco_seg_poly[0::2]
-                ys = coco_seg_poly[1::2]
-                x_min, y_min = min(xs), min(ys)
-                width = max(xs) - x_min
-                height = max(ys) - y_min
-                coco_bb = [int(x_min), int(y_min), int(width), int(height)]
+                # Slightly wider bounding box
+                bb_x, bb_y = rectangle_shapely.exterior.xy
+                coco_bb = create_coco_bounding_box(bb_x, bb_y, new_w, new_h, bound_pad=2)
+                
+                #xs = coco_seg_poly[0::2]
+                #ys = coco_seg_poly[1::2]
+                #x_min, y_min = min(xs), min(ys)
+                #width = max(xs) - x_min
+                #height = max(ys) - y_min
+                #coco_bb = [int(x_min), int(y_min), int(width), int(height)]
                 
                 coco_annotation_dict = {
                     "segmentation": [coco_seg_poly],
@@ -493,7 +617,7 @@ def _prepare_dataset(dataset, image_size: int, coco_json_path: Path, img_folder:
                     "iscrowd": 0,
                     "image_id": img_id,
                     "bbox": coco_bb,
-                    "category_id": int(class_id) - 1,
+                    "category_id": poly_type, #int(class_id) - 1,
                     "id": instance_id,
                 }
                 
@@ -508,8 +632,10 @@ def _prepare_dataset(dataset, image_size: int, coco_json_path: Path, img_folder:
             scene_id += 1
     
     with open(coco_json_path, "w") as f:
-        json.dump(save_dict, f)
+        json.dump(save_dict, f, default=int)
     print(f"COCO-converted dict saved to: {coco_json_path}")
+
+
 
 
 if __name__ == "__main__":
@@ -538,33 +664,175 @@ if __name__ == "__main__":
 
     #print(f"{full_plan}")
     #print(f"Full plan length: {len(full_plan)}")
+    augmented_annotations = []
+    augmented_images_names = []
+    for item in full_plan:
+        image_path = item["image"]
+        if Path(image_path).name in augmented_images_names:
+            continue
 
+        if image_path.name.endswith(".svg"):
+            png_data = cairosvg.svg2png(url=str(image_path))
+            img = Image.open(io.BytesIO(png_data)).convert("RGB")
+        else:
+            img = Image.open(image_path).convert("RGB")
+
+        img_array = np.array(img)
+        image_cv = img_array.copy()
+        w, h = img.size
+
+        area_path = item["area_file"]
+        final_augmented_polygons = []
+
+        with open(area_path, "r") as f:
+            data = json.load(f)
+
+            out_json_path = Path(area_path)
+            out_image_path = Path(image_path)
+            out_aug_annotation = out_json_path.parent.joinpath(f"aug_{out_json_path.name}")
+            out_aug_image = out_image_path.parent.joinpath(f"aug_{out_image_path.name}")
+            out_contour_image = out_image_path.parent.joinpath(f"aug_cntrs_{out_image_path.name}.png")
+
+            #class_raw_label = item["raw_label"]
+            #if class_raw_label == "All" or class_raw_label.lower() == "all":
+            #    print("! ----- Skipped 'ALL' contour -----")
+            #    continue
+            
+            areas = data.get("areas", [])
+            keypoints = []
+            polygon_raw_ids = []
+
+            for i, item in enumerate(areas):
+                raw_id = item["id"]
+                poly = item["polygon_px"]
+                out_poly = []
+                for point in poly:
+                    print(point)
+                    out_poly.append([point[0], point[1]])  # [x, y]
+                    #polygon_raw_ids.append(raw_id) # poly id
+                keypoints.append(out_poly)
+                polygon_raw_ids.append(tuple([i, raw_id])) # 0: bd_1 etc
+
+            new_w = int(w * 1.5)
+            new_h = int(h * 1.5)
+            print(f"Original size: {w}, {h}")
+            print(f"Aug size: {new_w}, {new_h}")
+            scale_w = new_w / w
+            scale_h = new_h / h
+            print("Scale: {}x{}".format(scale_w, scale_h))
+
+            M = np.float32([
+                [scale_w, 0.0, 0.0],
+                [0.0, scale_h, 0.0]
+            ])
+
+            scaled_keypoints = []
+            for poly in keypoints:
+                original_poly_cv = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
+                scaled_poly = cv2.transform(original_poly_cv, M).astype(np.int32)
+                approx_poly = scaled_poly.astype(np.float32).reshape(-1, 2).tolist()
+                scaled_keypoints.append(approx_poly)
+
+            aug_image = cv2.resize(img_array, (new_w, new_h))
+
+            #img_array = np.array(img)
+            #output_image = img_array.copy()
+            #output_image = cv2.cvtColor(output_image, cv2.COLOR_RGB2BGR)
+
+            #inter_image = img_array.copy()
+            ##for poly, _ in room_polygons:
+            #   random_color = np.random.randint(0, 256, size=3).tolist()
+            #   original_poly_cv = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
+            #    cv2.drawContours(output_image, [original_poly_cv], -1, random_color, thickness=3)
+            #cv2.imwrite("./output_stratify_{}_{}.png".format(scene_id, image_path.stem), output_image)
+
+            #transform = A.Compose([
+            #    #A.HorizontalFlip(p=0.5),
+            #    #A.RandomRotate90(p=1.0),
+            #    A.Resize(height=h*2.0, width=w*2.0, p=1.0),
+            #    #A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=30, p=0.7),
+            #    #A.RandomBrightnessContrast(p=0.5),
+            #], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
+            #transformed = transform(image=image_cv, keypoints=keypoints)
+            #aug_image = transformed['image']
+            #aug_keypoints = transformed['keypoints']
+            #print(polygon_raw_ids)
+
+            image_contours = aug_image.copy()
+            for index, raw_id in polygon_raw_ids:
+                print(f"{index}: {raw_id}")
+                for i in range(0, len(areas)):
+                    if areas[i]["id"] == raw_id:
+                        areas[i]["polygon_px"] = scaled_keypoints[index]
+                        areas[i]["image_name"] = out_aug_image.name
+                        areas[i]["width"] = new_w
+                        areas[i]["height"] = new_h
+                        random_color = np.random.randint(0, 256, size=3).tolist()
+                        original_poly_cv = np.array(areas[i]["polygon_px"], dtype=np.int32).reshape(-1, 1, 2)
+                        cv2.drawContours(image_contours, [original_poly_cv], -1, random_color, thickness=3)
+            data["areas"] = areas
+
+            #augmented_polygons = [[] for _ in range(len(keypoints))]
+            #for (x, y), raw_id in zip(aug_keypoints, polygon_indices):
+            #    augmented_polygons[raw_id].append([float(x), float(y)])
+            #final_augmented_polygons = [p for p in augmented_polygons if len(p) >= 3]
+            #areas[] = final_augmented_polygons
+
+
+            cv2.imwrite(out_contour_image, image_contours)
+            augmented_annotations.append({
+                "image": out_aug_image.absolute(),
+                "area_file": out_aug_annotation.absolute()
+            })
+            augmented_images_names.append(out_aug_image.name)
+
+            with open(out_aug_annotation, "w") as f:
+                json.dump(data, f)
+            #cv2.imwrite(out_aug_image, aug_image)
+            if out_aug_image.name.endswith(".svg"):
+                _, buffer = cv2.imencode('.png', aug_image)
+                image_bytes = buffer.tobytes()
+                svg_string = vtracer.convert_raw_image_to_svg(image_bytes, img_format='png')
+                with open(out_aug_image, "w", encoding="utf-8") as f:
+                    f.write(svg_string)
+            else:
+                pil_img = Image.fromarray(aug_image)
+                pil_img.save(out_aug_image)
+            print(f"Written augmented image into {out_aug_image} with annotation: {out_aug_annotation}")
+
+    full_plan.extend(augmented_annotations)
+    print(f"Plan length after adding augmentations: {len(full_plan)} ({len(augmented_annotations)} added)")
     scene_id = 0
-    instance_id = 0
+    
     image_size = 512
+    labels = [Path(os.path.join("./", annotation["area_file"])).parent.parent.name for annotation in full_plan]
 
     #
     # test / train split happens here
     #
-    #train_dataset, test_dataset = train_test_split(
-    #    full_plan,
-    #    test_size=0.2,
-    #    shuffle=True
-    #)
+    train_dataset, test_dataset = train_test_split(
+        full_plan,
+        test_size=0.2,
+        shuffle=True,
+        stratify=labels
+    )
 
-    k_fold = KFold(n_splits=5, shuffle=True)
-    for fold_idx, (train_index, test_index) in enumerate(k_fold.split(full_plan)):
-        print(f"--- Fold {fold_idx + 1} ---")
-        print(f"Test items count: {len(test_index)}")
-        print(f"Train items count: {len(train_index)}")
+    #k_fold = KFold(n_splits=5, shuffle=True)
+    #for fold_idx, (train_index, test_index) in enumerate(k_fold.split(full_plan)):
+    #    print(f"--- Fold {fold_idx + 1} ---")
+    for i in range(0, 1):
+        #print(f"Test items count: {len(test_index)}")
+        #print(f"Train items count: {len(train_index)}")
 
         #train_fold_items = full_plan[train_index]
         #test_fold_items = full_plan[test_index]
 
-        train_fold_items = [full_plan[i] for i in train_index]
-        test_fold_items = [full_plan[i] for i in test_index]
+        #train_fold_items = [full_plan[i] for i in train_index]
+        #test_fold_items = [full_plan[i] for i in test_index]
+        train_fold_items = train_dataset
+        test_fold_items = test_dataset
 
-        fold_path = os.path.join(out_folder, f"fold_{fold_idx}")
+        fold_path = os.path.join(out_folder, f"fold_{0}")
         if not os.path.exists(fold_path):
             os.mkdir(fold_path)
 
@@ -573,17 +841,19 @@ if __name__ == "__main__":
             os.mkdir(annotation_out_folder)
 
         train_path = os.path.join(annotation_out_folder, "train.json")
+        val_path = os.path.join(annotation_out_folder, "val.json")
         test_path = os.path.join(annotation_out_folder, "test.json")
 
-        img_train_path = os.path.join(annotation_out_folder, "train")
+        img_train_path = os.path.join(fold_path, "train")
         if not os.path.exists(img_train_path):
             os.mkdir(img_train_path)
         
-        img_test_path = os.path.join(annotation_out_folder, "test")
+        img_test_path = os.path.join(fold_path, "test")
         if not os.path.exists(img_test_path):
             os.mkdir(img_test_path)
 
         _prepare_dataset(train_fold_items, image_size, train_path, img_train_path, start_scene_id=start_scene_id)
-        _prepare_dataset(test_fold_items, image_size, test_path, img_test_path, start_scene_id=start_scene_id+len(train_index))
+        _prepare_dataset(test_fold_items, image_size, test_path, img_test_path, start_scene_id=start_scene_id+len(train_fold_items))
+        shutil.copy(test_path, val_path)
         print(f"Prepared fold: {fold_path}")
     

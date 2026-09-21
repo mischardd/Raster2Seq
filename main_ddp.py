@@ -435,12 +435,7 @@ def main(args):
                     )
             elif "pos_embed" in key and checkpoint[key].shape[1] != model.module.transformer.pos_embed.shape[1]:
                 checkpoint[key] = model.module.transformer.pos_embed
-            elif (
-                "attention_mask" in key 
-                and checkpoint.get(key) is not None 
-                and attn_mask is not None 
-                and checkpoint[key].shape[0] != attn_mask.shape[0]
-            ):
+            elif "attention_mask" in key and checkpoint[key].shape[0] != model.module.attention_mask.shape[0]:
                 checkpoint[key] = model.module.attention_mask
             elif key.startswith("input_proj") and key.endswith("weight"):
                 # only modify the conv layer

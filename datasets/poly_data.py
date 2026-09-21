@@ -195,11 +195,12 @@ class ConvertToCocoDict(object):
 
         file_name = os.path.join(self.root, path)
 
-        img_pil = Image.open(file_name).convert("L")
+        img = Image.open(file_name).convert("RGB")
 
         img_resized = img_pil.resize((512, 512), Image.Resampling.BILINEAR)
-        img = np.array(img_resized)
+        #img_resized = img_pil.resize((512, 512), Image.Resampling.BILINEAR)
 
+        img = np.array(img)
         #### NEW
         if len(img.shape) >= 3:
             if img.shape[-1] > 3:  # drop alpha channel
