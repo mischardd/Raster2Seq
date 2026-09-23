@@ -197,7 +197,6 @@ class ConvertToCocoDict(object):
 
         img = Image.open(file_name).convert("RGB")
 
-        img_resized = img_pil.resize((512, 512), Image.Resampling.BILINEAR)
         #img_resized = img_pil.resize((512, 512), Image.Resampling.BILINEAR)
 
         img = np.array(img)
