@@ -12,12 +12,14 @@ SEQ_LEN=512
 NUM_BINS=32
 CONVERTER=v3
 BATCH_SIZE=8
+EPOCHS=500
 
-#DATA=data/coco_cubicasa5k_nowalls_v4-1_refined/
-for ((i=0; i<4; i++)); do
-	JOB=custom_2d_res256_extended_2d_kfold_${i}
+DATA=/path/to/data
+JOB=job_name_1
+PRETRAIN=/path/to/pretrain/checkpoint.pth
+OUTPUT_DIR=/output/dir/
 
-	WANDB_MODE=online torchrun --nproc_per_node=1 main_ddp.py --dataset_name=cubicasa \
+WANDB_MODE=online torchrun --nproc_per_node=1 main_ddp.py --dataset_name=cubicasa \
 		       --dataset_root=${DATA} \
 		       --semantic_classes=12 \
 		       --job_name=${JOB} \
@@ -29,7 +31,7 @@ for ((i=0; i<4; i++)); do
 		       --num_bins ${NUM_BINS} \
 		       --disable_eval \
 		       --label_smoothing 0.1 \
-		       --epochs 500 \
+		       --epochs ${EPOCHS} \
 		       --lr_drop '' \
 		       --cls_loss_coef ${CLS_COEFF} \
 		       --coords_loss_coef ${COO_COEFF} \
@@ -43,4 +45,3 @@ for ((i=0; i<4; i++)); do
 		       --converter_version ${CONVERTER} \
 		       --use_anchor \
 		       --start_from_checkpoint ${PRETRAIN}
-done

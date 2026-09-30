@@ -517,6 +517,9 @@ def main(args):
                         },
                         checkpoint_path,
                     )
+                artifact = wandb.Artifact(name="model_output", type="model")
+                artifact.add_file(local_path=output_dir / f"checkpoint{epoch:04}.pth", name=f"model_{epoch:04}_checkpoint")
+                wandb.log_artifact(artifact)
             dist.barrier()
 
         log_stats = {**{f"train_{k}": v for k, v in train_stats.items()}, "epoch": epoch, "n_parameters": n_parameters}

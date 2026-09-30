@@ -1,7 +1,9 @@
 SPLIT=test 
 
-NAME=custom_2d_res256_kfold_4
+NAME=run_name_1
 SAVE_DIR=cross_eval_outputs/${NAME}
+DATA=/path/to/data
+CKPT=/path/to/checkpoint.pth
 
 python eval.py \
    --dataset_name=cubicasa \
